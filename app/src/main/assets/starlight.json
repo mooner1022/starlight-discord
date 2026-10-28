@@ -1,0 +1,10 @@
+{
+  "id":"discord",
+  "name":"Discord",
+  "main_class":"dev.mooner.starlightdiscord.StarlightDiscordPlugin",
+  "custom_classloader":"dev.mooner.starlightdiscord.loader.HostIsolatingClassLoader",
+  "version":"0.1.0",
+  "api_version":"0.3.2",
+  "authors":["mooner"],
+  "description":"Discord client implementation for StarLight"
+}

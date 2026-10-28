@@ -1,0 +1,70 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+    id 'org.jetbrains.kotlin.plugin.serialization'
+    id 'io.github.mooner1022.slplugin'
+    // Strips regex flags Android rejects from library bytecode (JDA's Checks fails to initialize otherwise).
+    id 'starlightdiscord.android-regex-compat'
+}
+
+android {
+    namespace 'dev.mooner.starlightdiscord'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "dev.mooner.starlightdiscord"
+        minSdk 26
+        targetSdk 33
+        versionCode 2
+        // Used as the plugin version in starlight.json checks.
+        versionName "0.1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+    kotlinOptions {
+        jvmTarget = JavaVersion.VERSION_11.toString()
+    }
+    packaging {
+        resources {
+            // Keeps META-INF/services (SLF4J provider) and okhttp3/internal/publicsuffix, which are needed at runtime.
+            excludes += ['META-INF/*', 'META-INF/versions/**', 'META-INF/native-image/**', 'META-INF/rewrite/**', 'META-INF/maven/**']
+        }
+    }
+}
+
+starlight {
+    sdk {
+        // Build these from the StarLight repository: ./gradlew :PluginCore:assembleRelease :ConfigDSL:assembleRelease
+        pluginCore = file("libs/PluginCore-release.aar")
+        configDsl = file("libs/ConfigDSL-release.aar")
+        excludeHostKotlinLibraries = true
+    }
+    deploy {
+        // Pass -Pstarlight.device=<serial or ip:port> or set STARLIGHT_DEVICE.
+        // Restarting force-stops StarLight on the device; opt in per run with -Pstarlight.restartApp=true.
+    }
+}
+
+dependencies {
+    // Provided by StarLight at runtime.
+    compileOnly "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0"
+    compileOnly "org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0"
+    compileOnly "androidx.core:core-ktx:1.16.0"
+    compileOnly "androidx.appcompat:appcompat:1.7.0"
+    compileOnly "com.google.android.material:material:1.12.0"
+
+    implementation('net.dv8tion:JDA:6.7.0') {
+        // Voice only. opus-java ships desktop natives through JNA, and tink (with protobuf) encrypts voice packets.
+        exclude group: 'club.minnced', module: 'opus-java'
+        exclude group: 'com.google.crypto.tink', module: 'tink'
+    }
+}
