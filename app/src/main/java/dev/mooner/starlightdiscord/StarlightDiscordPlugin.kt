@@ -48,13 +48,13 @@ import net.dv8tion.jda.api.events.session.ShutdownEvent
 import net.dv8tion.jda.api.hooks.ListenerAdapter
 import net.dv8tion.jda.api.requests.GatewayIntent
 import net.dv8tion.jda.api.utils.cache.CacheFlag
+import net.dv8tion.jda.internal.utils.JDALogger
 import java.io.InputStream
 import java.time.Duration
 import java.util.EnumSet
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import kotlin.time.Duration.Companion.seconds
 import dev.mooner.starlightdiscord.api.DiscordApi as DiscordStarlightApi
 
 private val LOG = LoggerFactory.logger("DiscordPlugin")
@@ -62,14 +62,18 @@ private val LOG = LoggerFactory.logger("DiscordPlugin")
 @Suppress("unused")
 class StarlightDiscordPlugin: StarlightPlugin() {
 
+    init {
+        initJdaLogger()
+    }
+
     @Volatile
     private var _jda: JDA? = null
     private val isRunning
         get() = _jda != null
 
     // The client is started and stopped on this thread only. Logging in does network I/O, which Android forbids
-    // on the main thread (config buttons are clicked there), and JDA looks up its SLF4J provider through the
-    // context class loader, which has to be this plugin's for StarlightServiceProvider to be found.
+    // on the main thread (config buttons are clicked there), and JDA looks up services through the context class
+    // loader, which has to be this plugin's.
     private val clientExecutor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "StarlightDiscord-Client").apply {
             isDaemon = true
@@ -330,6 +334,23 @@ class StarlightDiscordPlugin: StarlightPlugin() {
         return OPTIONAL_INTENTS.filter { it.name in names }
     }
 
+    /**
+     * JDALogger decides once, when its class initializes, whether to use SLF4J, by looking for a provider through
+     * the context class loader of whichever thread reaches it first. Reading the config already touches JDA
+     * (Activity.of) on StarLight's threads, so it is initialized here with this plugin's loader. Otherwise JDA
+     * logs to stderr instead of StarLight.
+     */
+    private fun initJdaLogger() {
+        val thread = Thread.currentThread()
+        val previous = thread.contextClassLoader
+        thread.contextClassLoader = StarlightDiscordPlugin::class.java.classLoader
+        try {
+            JDALogger.SLF4J_ENABLED
+        } finally {
+            thread.contextClassLoader = previous
+        }
+    }
+
     private fun refreshGuilds(jda: JDA) {
         guildNames.value = jda.guilds.map { it.name }
     }
@@ -413,8 +434,8 @@ class StarlightDiscordPlugin: StarlightPlugin() {
                     id = CONF_INTENTS
                     title = "Gateway Intents"
                     description = translate {
-                        Locale.ENGLISH { "Enabled on top of JDA's defaults. Privileged intents (★) must also be enabled in the Discord Developer Portal. Applied when the client restarts." }
-                        Locale.KOREAN  { "JDA 기본 인텐트에 더해 켜요. ★ 표시는 Discord 개발자 포털에서도 켜야 해요. 클라이언트를 다시 시작하면 적용돼요." }
+                        Locale.ENGLISH { "★ needs the Developer Portal too. Applied on restart." }
+                        Locale.KOREAN  { "★는 개발자 포털에서도 켜야 해요. 재시작하면 적용돼요." }
                     }
                     icon = Icon.BOOKMARK
                     iconTintColor = color { "#ab9df2" }
@@ -445,11 +466,11 @@ class StarlightDiscordPlugin: StarlightPlugin() {
                 info {
                     id = "gateway_ping"
                     title = "게이트웨이 핑"
+                    // Read once when the screen opens. Redrawing rows while a text field has focus scrolls the
+                    // screen back to that field, so this is not refreshed periodically.
+                    value = _jda?.gatewayPing?.takeIf { it >= 0 }?.let { "${it}ms" }
                     icon = Icon.TIMER
                     iconTintColor = color { "#ab9df2" }
-                    bindValue(every = PING_REFRESH_INTERVAL) {
-                        _jda?.gatewayPing?.takeIf { it >= 0 }?.let { "${it}ms" }
-                    }
                 }
                 textList {
                     id = "guilds"
@@ -672,6 +693,5 @@ class StarlightDiscordPlugin: StarlightPlugin() {
         )
         private const val AVATAR_SIZE = 128
         private val SHUTDOWN_TIMEOUT: Duration = Duration.ofSeconds(10)
-        private val PING_REFRESH_INTERVAL = 5.seconds
     }
 }
