@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.text.InputType
 import dev.mooner.configdsl.ConfigActionScope
+import dev.mooner.configdsl.ConfigDSL
 import dev.mooner.configdsl.ConfigStructure
 import dev.mooner.configdsl.Icon
 import dev.mooner.configdsl.config
@@ -23,12 +24,17 @@ import dev.mooner.starlightdiscord.event.DiscordMessageCreateEvent
 import dev.mooner.starlightdiscord.event.DiscordOnMessageCompatEvent
 import dev.mooner.starlightdiscord.event.DiscordResponseCompatEvent
 import dev.mooner.starlightdiscord.models.DiscordChatRoomImpl
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
 import net.dv8tion.jda.api.JDA
 import net.dv8tion.jda.api.JDABuilder
 import net.dv8tion.jda.api.JDAInfo
@@ -49,12 +55,14 @@ import net.dv8tion.jda.api.hooks.ListenerAdapter
 import net.dv8tion.jda.api.requests.GatewayIntent
 import net.dv8tion.jda.api.utils.cache.CacheFlag
 import net.dv8tion.jda.internal.utils.JDALogger
+import java.io.File
 import java.io.InputStream
 import java.time.Duration
 import java.util.EnumSet
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import kotlin.coroutines.resume
 import dev.mooner.starlightdiscord.api.DiscordApi as DiscordStarlightApi
 
 private val LOG = LoggerFactory.logger("DiscordPlugin")
@@ -85,6 +93,8 @@ class StarlightDiscordPlugin: StarlightPlugin() {
     // Shown by the settings screen while it is open.
     private val clientState = MutableStateFlow<ClientState>(ClientState.Offline)
     private val guildNames  = MutableStateFlow<List<String>>(emptyList())
+    // Kept in its own file and saved as soon as it is picked: config buttons can't store values.
+    private val selectedIntents = MutableStateFlow(DEFAULT_INTENTS)
 
     private var token              : String? = null
     private var excludeSelf        : Boolean = true
@@ -148,6 +158,7 @@ class StarlightDiscordPlugin: StarlightPlugin() {
 
     override fun onEnable() {
         updateConfig(getPluginConfig())
+        selectedIntents.value = loadIntents()
         addApi(DiscordStarlightApi())
 
         registerProjectEvents {
@@ -273,7 +284,7 @@ class StarlightDiscordPlugin: StarlightPlugin() {
             return
         }
 
-        val intents = getIntents()
+        val intents = selectedIntents.value
         LOG.debug { "Starting discord client with additional intents: ${intents.joinToString { it.name }}" }
         val enabledIntents = GatewayIntent.getIntents(GatewayIntent.DEFAULT) + intents
         clientState.value = ClientState.Connecting
@@ -325,14 +336,32 @@ class StarlightDiscordPlugin: StarlightPlugin() {
         startClient()
     }
 
-    private fun getIntents(): List<GatewayIntent> {
-        val names = getPluginConfig()
-            .category("general")
-            .getList(CONF_INTENTS)
-            ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
-            ?: return DEFAULT_INTENTS
+    private val intentsFile: File
+        get() = File(getExternalDataDirectory(), INTENTS_FILE_NAME)
+
+    private fun loadIntents(): List<GatewayIntent> {
+        val file = intentsFile
+        if (!file.exists())
+            return DEFAULT_INTENTS
+        val names = try {
+            Json.parseToJsonElement(file.readText())
+                .jsonArray
+                .mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+        } catch (e: Exception) {
+            LOG.warn { "Failed to read ${file.name}, using the default intents: $e" }
+            return DEFAULT_INTENTS
+        }
         return OPTIONAL_INTENTS.filter { it.name in names }
     }
+
+    private fun saveIntents(intents: List<GatewayIntent>) {
+        intentsFile.writeText(JsonArray(intents.map { JsonPrimitive(it.name) }).toString())
+    }
+
+    private suspend fun ConfigActionScope.multiSelect(title: String, items: List<String>, selected: Set<Int>): Set<Int>? =
+        suspendCancellableCoroutine { cont ->
+            ConfigDSL.dialogProvider.multiSelect(context, title, items, selected) { if (cont.isActive) cont.resume(it) }
+        }
 
     /**
      * JDALogger decides once, when its class initializes, whether to use SLF4J, by looking for a provider through
@@ -430,18 +459,62 @@ class StarlightDiscordPlugin: StarlightPlugin() {
                     icon = Icon.KEY
                     iconTintColor = color { "#ab9df2" }
                 }
-                multiChoice {
-                    id = CONF_INTENTS
+                textList {
+                    id = "intents"
                     title = "Gateway Intents"
-                    description = translate {
-                        Locale.ENGLISH { "★ needs the Developer Portal too. Applied on restart." }
-                        Locale.KOREAN  { "★는 개발자 포털에서도 켜야 해요. 재시작하면 적용돼요." }
-                    }
                     icon = Icon.BOOKMARK
                     iconTintColor = color { "#ab9df2" }
-                    for (intent in OPTIONAL_INTENTS)
-                        option(intent.name, if (intent in PRIVILEGED_INTENTS) "★ ${intent.name}" else intent.name)
-                    defaultKeys = DEFAULT_INTENTS.mapTo(linkedSetOf(), GatewayIntent::name)
+                    emptyText = translate {
+                        Locale.ENGLISH { "JDA's default intents only" }
+                        Locale.KOREAN  { "JDA 기본 인텐트만 사용해요." }
+                    }
+                    lines = selectedIntents.value.map(::intentLabel)
+                    bind(selectedIntents.map { intents -> intents.map(::intentLabel) })
+                }
+                button {
+                    id = "select_intents"
+                    title = translate {
+                        Locale.ENGLISH { "Select Intents" }
+                        Locale.KOREAN  { "인텐트 선택" }
+                    }
+                    description = translate {
+                        Locale.ENGLISH { "Added to JDA's defaults. ★ needs the Developer Portal too. Saved as soon as you confirm." }
+                        Locale.KOREAN  { "JDA 기본 인텐트에 더해 켜요. ★는 개발자 포털에서도 켜야 해요. 확인하면 바로 저장돼요." }
+                    }
+                    icon = Icon.EDIT
+                    iconTintColor = color { "#ab9df2" }
+                    action {
+                        val current = selectedIntents.value
+                        val picked = multiSelect(
+                            title = "Gateway Intents",
+                            items = OPTIONAL_INTENTS.map(::intentLabel),
+                            selected = OPTIONAL_INTENTS.indices.filterTo(hashSetOf()) { OPTIONAL_INTENTS[it] in current },
+                        ) ?: return@action
+                        val intents = OPTIONAL_INTENTS.filterIndexed { index, _ -> index in picked }
+                        if (intents == current)
+                            return@action
+                        withContext(Dispatchers.IO) { saveIntents(intents) }
+                        selectedIntents.value = intents
+
+                        val restart = isRunning && confirm(
+                            translate {
+                                Locale.ENGLISH { "Apply Intents" }
+                                Locale.KOREAN  { "인텐트 적용" }
+                            },
+                            translate {
+                                Locale.ENGLISH { "Saved. Restart the client now to apply them?" }
+                                Locale.KOREAN  { "저장했어요. 지금 클라이언트를 다시 시작해서 적용할까요?" }
+                            },
+                        )
+                        if (restart) {
+                            withContext(clientDispatcher) { restartClient() }
+                            peekClientState()
+                        } else
+                            peek(translate {
+                                Locale.ENGLISH { "Saved. Applied when the client restarts." }
+                                Locale.KOREAN  { "저장했어요. 클라이언트를 다시 시작하면 적용돼요." }
+                            }, PeekType.SUCCESS)
+                    }
                 }
             }
         }
@@ -670,9 +743,9 @@ class StarlightDiscordPlugin: StarlightPlugin() {
     }
 
     companion object {
-        // Javacord stored intent indices under "intents" and plugin 0.1.0 stored JDA's under "gateway_intents".
-        // Names are kept under a new key so neither is misread.
-        private const val CONF_INTENTS = "gateway_intent_names"
+        // Javacord stored intent indices under "intents" and plugin 0.1.0 stored JDA's under "gateway_intents" in
+        // config-plugin.json. Names are kept in a file of their own, so neither is misread.
+        private const val INTENTS_FILE_NAME = "gateway-intents.json"
         private const val ACTIVITY_NONE = "none"
         // The intents GatewayIntent.DEFAULT leaves out. The client always enables the others.
         private val OPTIONAL_INTENTS = GatewayIntent.entries - GatewayIntent.getIntents(GatewayIntent.DEFAULT)
@@ -693,5 +766,8 @@ class StarlightDiscordPlugin: StarlightPlugin() {
         )
         private const val AVATAR_SIZE = 128
         private val SHUTDOWN_TIMEOUT: Duration = Duration.ofSeconds(10)
+
+        private fun intentLabel(intent: GatewayIntent): String =
+            if (intent in PRIVILEGED_INTENTS) "★ ${intent.name}" else intent.name
     }
 }
