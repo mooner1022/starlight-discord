@@ -15,6 +15,7 @@ import dev.mooner.configdsl.utils.PeekType
 import dev.mooner.starlight.plugincore.chat.ChatSender
 import dev.mooner.starlight.plugincore.chat.Message
 import dev.mooner.starlight.plugincore.config.data.ConfigData
+import dev.mooner.starlight.plugincore.config.data.MutableConfig
 import dev.mooner.starlight.plugincore.logger.LoggerFactory
 import dev.mooner.starlight.plugincore.plugin.StarlightPlugin
 import dev.mooner.starlight.plugincore.project.Project
@@ -51,11 +52,16 @@ import net.dv8tion.jda.api.events.guild.update.GuildUpdateNameEvent
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent
 import net.dv8tion.jda.api.events.session.ReadyEvent
 import net.dv8tion.jda.api.events.session.ShutdownEvent
+import net.dv8tion.jda.api.exceptions.InvalidTokenException
 import net.dv8tion.jda.api.hooks.ListenerAdapter
+import net.dv8tion.jda.api.requests.CloseCode
 import net.dv8tion.jda.api.requests.GatewayIntent
 import net.dv8tion.jda.api.utils.cache.CacheFlag
 import net.dv8tion.jda.internal.utils.JDALogger
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.File
+import java.io.IOException
 import java.io.InputStream
 import java.time.Duration
 import java.util.EnumSet
@@ -96,7 +102,12 @@ class StarlightDiscordPlugin: StarlightPlugin() {
     // Kept in its own file and saved as soon as it is picked: config buttons can't store values.
     private val selectedIntents = MutableStateFlow(DEFAULT_INTENTS)
 
+    // Kept in the app's internal storage, not in config-plugin.json on shared storage: whoever holds it controls the bot.
+    @Volatile
     private var token              : String? = null
+    // Set when Discord rejects the saved token, e.g. after it was reset in the Developer Portal.
+    @Volatile
+    private var isTokenRejected    : Boolean = false
     private var excludeSelf        : Boolean = true
     private var excludeBot         : Boolean = true
     private var logReceivedMessage : Boolean = false
@@ -106,6 +117,13 @@ class StarlightDiscordPlugin: StarlightPlugin() {
     private var activity           : Activity? = null
 
     private val avatarBitmapCache  : MutableMap<Long, Bitmap> = ConcurrentHashMap()
+
+    // Only checks tokens entered in the setup; the client makes its own.
+    private val httpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .callTimeout(TOKEN_CHECK_TIMEOUT)
+            .build()
+    }
 
     private val listener = object : ListenerAdapter() {
 
@@ -135,6 +153,8 @@ class StarlightDiscordPlugin: StarlightPlugin() {
             guildNames.value = emptyList()
             val reason = event.closeCode?.meaning ?: "code ${event.code}"
             clientState.value = ClientState.Failed(reason)
+            if (event.closeCode == CloseCode.AUTHENTICATION_FAILED)
+                onTokenRejected()
             LOG.error {
                 translate {
                     Locale.ENGLISH { "Discord client stopped: $reason" }
@@ -158,6 +178,7 @@ class StarlightDiscordPlugin: StarlightPlugin() {
 
     override fun onEnable() {
         updateConfig(getPluginConfig())
+        token = loadToken()
         selectedIntents.value = loadIntents()
         addApi(DiscordStarlightApi())
 
@@ -169,7 +190,167 @@ class StarlightDiscordPlugin: StarlightPlugin() {
             }
         }
 
-        clientExecutor.execute(::startClient)
+        if (token != null)
+            clientExecutor.execute(::startClient)
+        else
+            LOG.info {
+                translate {
+                    Locale.ENGLISH { "No bot token yet. The client starts once the initial setup is done." }
+                    Locale.KOREAN  { "봇 토큰이 없어요. 초기 설정을 마치면 클라이언트를 시작해요." }
+                }
+            }
+    }
+
+    override fun isSetupRequired(): Boolean =
+        token == null || isTokenRejected
+
+    override fun getSetupReason(): String? =
+        if (isTokenRejected)
+            translate {
+                Locale.ENGLISH { "Discord rejected the saved bot token. Enter a new one." }
+                Locale.KOREAN  { "저장된 봇 토큰을 디스코드가 거부했어요. 새 토큰을 입력하세요." }
+            }
+        else
+            null
+
+    /**
+     * Asks for the setup again. Only for a token Discord refused: network or Discord outages leave the
+     * token alone, since asking for it then would have the user re-enter a token that still works.
+     */
+    private fun onTokenRejected() {
+        if (isTokenRejected)
+            return
+        isTokenRejected = true
+        LOG.warn {
+            translate {
+                Locale.ENGLISH { "Discord rejected the saved bot token. Asking for the initial setup again." }
+                Locale.KOREAN  { "저장된 봇 토큰을 디스코드가 거부했어요. 초기 설정을 다시 요청해요." }
+            }
+        }
+        // StarLight builds from before the setup API lack requestSetup(); uncaught, this would end the app.
+        try {
+            requestSetup()
+        } catch (e: LinkageError) {
+            LOG.debug { "This StarLight build can't ask for the setup again: $e" }
+        }
+    }
+
+    override fun getSetupStructure(): ConfigStructure = config {
+        category {
+            id = CATEGORY_SETUP
+            title = translate {
+                Locale.ENGLISH { "Bot" }
+                Locale.KOREAN  { "봇" }
+            }
+            textColor = color { "#ab9df2" }
+            items {
+                string {
+                    id = KEY_TOKEN
+                    title = translate {
+                        Locale.ENGLISH { "Bot Token" }
+                        Locale.KOREAN  { "봇 토큰" }
+                    }
+                    description = translate {
+                        Locale.ENGLISH { "Copy it from Bot > Token in the Discord Developer Portal." }
+                        Locale.KOREAN  { "디스코드 개발자 포털의 Bot > Token에서 복사하세요." }
+                    }
+                    hint = translate {
+                        Locale.ENGLISH { "Enter token for bot to log in..." }
+                        Locale.KOREAN  { "로그인할 봇의 토큰을 입력하세요..." }
+                    }
+                    // Anyone holding the token controls the bot, so it is masked like a password.
+                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                    require = ::tokenFormatError
+                    icon = Icon.KEY
+                    iconTintColor = color { "#ab9df2" }
+                }
+            }
+        }
+    }
+
+    /** Keeps the token only once Discord accepts it, then (re)starts the client with it. */
+    override suspend fun onSetup(values: ConfigData): String? {
+        val newToken = values.category(CATEGORY_SETUP).getString(KEY_TOKEN)?.trim().orEmpty()
+        tokenFormatError(newToken)?.let { return it }
+        // On the client thread: it is allowed network I/O and has this plugin's context class loader.
+        withContext(clientDispatcher) { verifyToken(newToken) }?.let { return it }
+        withContext(Dispatchers.IO) { saveToken(newToken) }
+        token = newToken
+        isTokenRejected = false
+        clientExecutor.execute(::restartClient)
+        return null
+    }
+
+    private fun tokenFormatError(token: String): String? =
+        when {
+            token.isBlank() -> translate {
+                Locale.ENGLISH { "Enter the bot token." }
+                Locale.KOREAN  { "봇 토큰을 입력하세요." }
+            }
+            token.any(Char::isWhitespace) -> translate {
+                Locale.ENGLISH { "Token can't contain whitespace." }
+                Locale.KOREAN  { "토큰에는 공백이 들어갈 수 없어요." }
+            }
+            else -> null
+        }
+
+    /** Runs on [clientExecutor]. Returns why Discord didn't accept [token], or null when it did. */
+    private fun verifyToken(token: String): String? {
+        val request = Request.Builder()
+            .url(TOKEN_CHECK_URL)
+            .header("Authorization", "Bot $token")
+            .build()
+        return try {
+            httpClient.newCall(request).execute().use { response ->
+                when (response.code) {
+                    200  -> null
+                    401  -> translate {
+                        Locale.ENGLISH { "Discord rejected this token. Check it and try again." }
+                        Locale.KOREAN  { "디스코드가 이 토큰을 거부했어요. 토큰을 확인하고 다시 시도하세요." }
+                    }
+                    else -> translate {
+                        Locale.ENGLISH { "Couldn't check the token (HTTP ${response.code}). Try again later." }
+                        Locale.KOREAN  { "토큰을 확인하지 못했어요. (HTTP ${response.code}) 잠시 후 다시 시도하세요." }
+                    }
+                }
+            }
+        } catch (e: IOException) {
+            translate {
+                Locale.ENGLISH { "Couldn't reach Discord: ${e.message ?: e}" }
+                Locale.KOREAN  { "디스코드에 연결하지 못했어요: ${e.message ?: e}" }
+            }
+        }
+    }
+
+    private val tokenFile: File
+        get() = File(getInternalDataDirectory(), TOKEN_FILE_NAME)
+
+    /** Reads the saved token, moving one left in config-plugin.json by plugin 0.2.0 and earlier. */
+    private fun loadToken(): String? {
+        val file = tokenFile
+        if (file.isFile)
+            return file.readText().trim().takeIf(String::isNotEmpty)
+
+        val config = getPluginConfig() as? MutableConfig ?: return null
+        val legacy = config.categoryOrNull(CATEGORY_GENERAL)
+            ?.getString(KEY_TOKEN)
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?: return null
+        try {
+            saveToken(legacy)
+        } catch (e: IOException) {
+            LOG.warn { "Failed to move the bot token out of config-plugin.json: $e" }
+            return legacy
+        }
+        config.edit { category(CATEGORY_GENERAL).remove(KEY_TOKEN) }
+        return legacy
+    }
+
+    private fun saveToken(token: String) {
+        val file = tokenFile
+        file.parentFile?.mkdirs()
+        file.writeText(token)
     }
 
     override fun onDisable() {
@@ -184,9 +365,6 @@ class StarlightDiscordPlugin: StarlightPlugin() {
     }
 
     private fun updateConfig(config: ConfigData) {
-        token = config.category("general").getString("token")
-            ?.takeIf(String::isNotBlank)
-
         logReceivedMessage = config
             .category("dev_mode")
             .getBoolean("log_received_message", false)
@@ -309,6 +487,8 @@ class StarlightDiscordPlugin: StarlightPlugin() {
                     Locale.KOREAN  { "디스코드 서버 시작 실패: $e" }
                 }
             }
+            if (e is InvalidTokenException)
+                onTokenRejected()
         }
     }
 
@@ -428,33 +608,36 @@ class StarlightDiscordPlugin: StarlightPlugin() {
 
     override fun getConfigStructure(): ConfigStructure = config {
         category {
-            id = "general"
+            id = CATEGORY_GENERAL
             title = translate {
                 Locale.ENGLISH { "General" }
                 Locale.KOREAN  { "일반" }
             }
             textColor = color { "#ab9df2" }
             items {
-                string {
-                    id = "token"
+                info {
+                    id = "token_state"
                     title = translate {
                         Locale.ENGLISH { "Bot Token" }
-                        Locale.KOREAN { "봇 토큰" }
+                        Locale.KOREAN  { "봇 토큰" }
                     }
-                    hint = translate {
-                        Locale.ENGLISH { "Enter token for bot to log in..." }
-                        Locale.KOREAN  { "로그인할 봇의 토큰을 입력하세요..." }
+                    value = when {
+                        isTokenRejected -> translate {
+                            Locale.ENGLISH { "Rejected" }
+                            Locale.KOREAN  { "거부됨" }
+                        }
+                        token != null -> translate {
+                            Locale.ENGLISH { "Set" }
+                            Locale.KOREAN  { "설정됨" }
+                        }
+                        else -> translate {
+                            Locale.ENGLISH { "Not set" }
+                            Locale.KOREAN  { "설정 안 됨" }
+                        }
                     }
-                    // Anyone holding the token controls the bot, so it is masked like a password.
-                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-                    require = { token ->
-                        if (token.any(Char::isWhitespace))
-                            translate {
-                                Locale.ENGLISH { "Token can't contain whitespace." }
-                                Locale.KOREAN  { "토큰에는 공백이 들어갈 수 없어요." }
-                            }
-                        else
-                            null
+                    description = translate {
+                        Locale.ENGLISH { "Change it from Setup in the plugin list or the plugin info screen." }
+                        Locale.KOREAN  { "플러그인 목록이나 플러그인 정보 화면의 '초기 설정'에서 바꿀 수 있어요." }
                     }
                     icon = Icon.KEY
                     iconTintColor = color { "#ab9df2" }
@@ -746,6 +929,12 @@ class StarlightDiscordPlugin: StarlightPlugin() {
         // Javacord stored intent indices under "intents" and plugin 0.1.0 stored JDA's under "gateway_intents" in
         // config-plugin.json. Names are kept in a file of their own, so neither is misread.
         private const val INTENTS_FILE_NAME = "gateway-intents.json"
+        // In getInternalDataDirectory(): kept when the plugin is removed with its data kept, deleted otherwise.
+        private const val TOKEN_FILE_NAME = "bot-token"
+        private const val TOKEN_CHECK_URL = "https://discord.com/api/v10/users/@me"
+        private const val CATEGORY_GENERAL = "general"
+        private const val CATEGORY_SETUP = "setup"
+        private const val KEY_TOKEN = "token"
         private const val ACTIVITY_NONE = "none"
         // The intents GatewayIntent.DEFAULT leaves out. The client always enables the others.
         private val OPTIONAL_INTENTS = GatewayIntent.entries - GatewayIntent.getIntents(GatewayIntent.DEFAULT)
@@ -766,6 +955,7 @@ class StarlightDiscordPlugin: StarlightPlugin() {
         )
         private const val AVATAR_SIZE = 128
         private val SHUTDOWN_TIMEOUT: Duration = Duration.ofSeconds(10)
+        private val TOKEN_CHECK_TIMEOUT: Duration = Duration.ofSeconds(15)
 
         private fun intentLabel(intent: GatewayIntent): String =
             if (intent in PRIVILEGED_INTENTS) "★ ${intent.name}" else intent.name
