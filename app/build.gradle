@@ -15,9 +15,9 @@ android {
         applicationId "dev.mooner.starlightdiscord"
         minSdk 26
         targetSdk 33
-        versionCode 5
+        versionCode 6
         // Used as the plugin version in starlight.json checks.
-        versionName "0.4.0"
+        versionName "0.5.0"
     }
 
     buildTypes {
