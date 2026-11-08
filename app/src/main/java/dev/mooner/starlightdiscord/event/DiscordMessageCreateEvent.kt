@@ -6,6 +6,15 @@ import dev.mooner.starlight.plugincore.translation.Locale
 import dev.mooner.starlight.plugincore.translation.translate
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent
 
+/**
+ * The Discord bot received a message.
+ *
+ * Called for each message in the channels the bot can read, except the ones the plugin's settings ignore: by default,
+ * its own messages and those of other bots.
+ *
+ * @param event JDA's `MessageReceivedEvent`: `event.getMessage()`, `event.getAuthor()`, `event.getChannel()`, ...
+ * @see guide:setup
+ */
 class DiscordMessageCreateEvent: ProjectEvent() {
 
     override val functionName: String = "onMessageCreate"
@@ -13,6 +22,11 @@ class DiscordMessageCreateEvent: ProjectEvent() {
     override val id: String = "create"
 
     override val name: String = "디스코드 메세지 생성"
+
+    override val description: String = translate {
+        Locale.ENGLISH { "When the Discord bot receives a message" }
+        Locale.KOREAN  { "디스코드 봇이 메시지를 받았을 때" }
+    }
 
     override val functionComment: String = translate {
         Locale.ENGLISH {

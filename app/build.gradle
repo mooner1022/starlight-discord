@@ -1,6 +1,7 @@
 plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
+    id 'com.google.devtools.ksp'
     id 'io.github.mooner1022.slplugin'
     // Strips regex flags Android rejects from library bytecode (JDA's Checks fails to initialize otherwise).
     id 'starlightdiscord.android-regex-compat'
