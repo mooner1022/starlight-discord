@@ -1,5 +1,5 @@
 pluginManagement {
-    includeBuild 'build-logic'
+    includeBuild("build-logic")
     repositories {
         gradlePluginPortal()
         google()
@@ -13,5 +13,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-include ':app'
+include(":app")
 rootProject.name = "StarlightDiscord"

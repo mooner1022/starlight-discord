@@ -5,7 +5,7 @@ import java.util.Collections
 import java.util.Enumeration
 
 /**
- * Parent of this plugin's class loader, registered as `custom_classloader` in starlight.json.
+ * Parent of this plugin's class loader, registered as `customClassLoader` in the manifest (app/build.gradle.kts).
  *
  * StarLight loads plugin classes parent-first, so a package the host app also ships always resolves to the
  * host's copy. The host bundles OkHttp 4 (through Coil) while JDA is built against OkHttp 5, and mixing the two
